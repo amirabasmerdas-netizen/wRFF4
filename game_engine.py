@@ -20,7 +20,8 @@ class Advisor:
             threats.append("🛡️ Your infantry is undertrained. Upgrade barracks immediately.")
         
         # Resource imbalance
-        if resources['gold'] > 2000 and min(resources[r] for r in Config.RESOURCES if r != 'gold') < 400:
+        total_resources = sum(resources[r] for r in Config.RESOURCES)
+        if resources['gold'] > 2000 and total_resources - resources['gold'] < 1200:
             threats.append("💰 Resource imbalance detected. Convert gold to needed resources via trade.")
         
         return threats
@@ -53,31 +54,32 @@ class AIEngine:
             self._ai_decision_cycle(country)
     
     def _ai_decision_cycle(self, country: str):
-        # Simple strategic logic - expandable in V3
         resources = self.db.get_resources(country)
         army = self.db.get_army(country)
         
-        # Decision weights
+        # Decision weights based on state
         actions = []
         
         # 1. If rich in resources, upgrade army
-        if sum(resources[r] for r in Config.RESOURCES) > 3000:
+        total_resources = sum(resources[r] for r in Config.RESOURCES)
+        if total_resources > 3000:
             actions.append(('upgrade', 0.4))
         
         # 2. If army strong relative to neighbors, attack weakest
-        if army['infantry'] + army['cavalry'] > 150:
+        army_power = army['infantry'] * 1.0 + army['cavalry'] * 1.5 + army['archers'] * 1.2
+        if army_power > 200:
             actions.append(('attack', 0.35))
         
         # 3. If weak, seek alliance
-        if army['infantry'] < 60:
+        if army_power < 100:
             actions.append(('alliance', 0.25))
         
         if not actions:
             return
         
         # Weighted random choice
-        total = sum(w for _, w in actions)
-        rand = random.uniform(0, total)
+        total_weight = sum(w for _, w in actions)
+        rand = random.uniform(0, total_weight)
         cumulative = 0
         chosen = actions[0][0]
         
@@ -106,36 +108,70 @@ class AIEngine:
         if resources['gold'] >= 250 and resources['food'] >= 200:
             affordable.append('cavalry')
         
-        if affordable:
-            unit = random.choice(affordable)
-            cost = {'gold': -200, 'iron': -150} if unit == 'infantry' else {'gold': -250, 'food': -200}
-            self.db.update_resources(country, cost)
-            self.db.conn.execute(
-                f"UPDATE army SET {unit}={unit}+30, {unit}_lvl={unit}_lvl}+1 WHERE country=?",
-                (country,)
-            )
-            self.db.conn.commit()
-            self.db.log_event('AI_UPGRADE', f"{country} upgraded {unit} units", [country])
+        if not affordable:
+            return
+        
+        unit = random.choice(affordable)
+        cost = {'gold': -200, 'iron': -150} if unit == 'infantry' else {'gold': -250, 'food': -200}
+        
+        # Apply resource costs
+        new_resources = {k: resources[k] + v for k, v in cost.items()}
+        self.db.update_resources(country, new_resources)
+        
+        # Upgrade army - CORRECTED SQL WITH PROPER BRACE BALANCING
+        self.db.conn.execute(
+            f"UPDATE army SET {unit} = {unit} + 30, {unit}_lvl = {unit}_lvl + 1 WHERE country = ?",
+            (country,)
+        )
+        self.db.conn.commit()
+        self.db.log_event('AI_UPGRADE', f"{country} upgraded {unit} units", [country])
     
     def _ai_attack(self, country: str):
-        # Simplified: attack weakest neighbor
         human_players = self.db.get_human_players()
         if not human_players:
             return
         
-        target_country = min(
+        # Find weakest human player by army strength
+        weakest = min(
             human_players,
             key=lambda x: sum(self.db.get_army(x[1]).get(u, 0) for u in ['infantry', 'cavalry', 'archers'])
-        )[1]
+        )
+        target_country = weakest[1]
         
-        # Simulate battle (simplified)
-        attacker_str = sum(self.db.get_army(country).get(u, 0) * 1.2 for u in ['infantry', 'cavalry'])
-        defender_str = sum(self.db.get_army(target_country).get(u, 0) * 1.0 for u in ['infantry', 'archers'])
+        # Simulate battle (simplified probability-based outcome)
+        attacker_army = self.db.get_army(country)
+        defender_army = self.db.get_army(target_country)
         
-        if attacker_str > defender_str * 0.8:  # 80% threshold to attempt attack
-            outcome = "victory" if random.random() < 0.6 else "defeat"
-            self.db.log_event(
-                'BATTLE',
-                f"AI {country} attacked {target_country} - {outcome.upper()}",
-                [country, target_country]
-            )
+        attacker_strength = (
+            attacker_army['infantry'] * 1.0 + 
+            attacker_army['cavalry'] * 1.8 + 
+            attacker_army['archers'] * 1.3
+        )
+        defender_strength = (
+            defender_army['infantry'] * 1.2 + 
+            defender_army['archers'] * 1.4 + 
+            defender_army['cavalry'] * 1.0
+        )
+        
+        # Base win probability on strength ratio
+        win_prob = min(0.9, max(0.1, attacker_strength / (attacker_strength + defender_strength)))
+        outcome = "victory" if random.random() < win_prob else "defeat"
+        
+        self.db.log_event(
+            'BATTLE',
+            f"⚔️ AI {country} attacked {target_country} - {outcome.upper()}",
+            [country, target_country]
+        )
+        
+        # Post to news channel
+        if Config.NEWS_CHANNEL:
+            try:
+                from telegram.ext import Application
+                # This would be handled by the main bot instance in practice
+                pass
+            except:
+                pass
+    
+    def _ai_seek_alliance(self, country: str):
+        # Simplified: propose alliance to strongest neighbor
+        pass
